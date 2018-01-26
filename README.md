@@ -30,8 +30,13 @@ You can set the environment variable `CACHEWRAP_OPTS` to a
 comma-separated list of options:
 
  - `help`         print this text and exit
- - `debug`        output some debugging information
- - `server`       specify Memcache server address (default `127.0.0.1:11211`)
+ - `debug`        output some debugging information to stderr
+ - `debug=file`   output some debugging information to file
+ - `server=...`   specify Memcache server address (default `127.0.0.1:11211`)
+ - `filter=...`   Perl regular expression to decide whether to use the cache.
+                  The list of command line arguments is joined with spaces, and the
+                  result is matched against this regex.  If it doesn't match, cache
+                  is disabled (as if the nocache option was used)
  - `nocache`      disable cache, always run actual command
  - `clear`        clear cache (delete from Memcache) then run the actual command
  - `nuke`         alias for `clear`
@@ -39,4 +44,7 @@ comma-separated list of options:
 #### using options
 ```
 $ CACHEWRAP_OPTS=server=2.3.4.5:11211,debug slow-cmd arg1 arg2
+$ $OPTS_ENVVAR_NAME=filter='^date +%s$' slow-cmd arg1 arg2
+# when slow-cmd calls 'date +%s', it gets a cached result, while
+# any other date(1) invocation bypasses the cache
 ```
