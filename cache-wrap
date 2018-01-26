@@ -77,6 +77,7 @@ HELP
     exit 1;
 }
 
+sub _do_debug ();
 sub _debug ($);
 
 sub _fatal ($) {
@@ -95,15 +96,30 @@ sub main () {
     );
 
     if ( exists $OPTIONS->{debug} ) {
+        my $file = $OPTIONS->{debug};
+        *_do_debug = sub () { 1 };
         *_debug = sub ($) {
             my ($msg) = @_;
 
-            $msg =~ s/^/# /mg;
+            $msg =~ s/^/# /mg if $msg;
             $msg .= "\n" unless substr($msg, -1, 1) eq "\n";
 
-            print STDERR "$msg";
+            if ( $file ) {
+                {{
+                    open my $fh, '>>', $file or last;
+                    print $fh $msg;
+                    close $file;
+                    return;
+                }}
+            }
+
+            print STDERR $msg;
         };
+
+        _debug "";
+        _debug "Invoked as: " . join ' ', $0, @ARGV;
     } else {
+        *_do_debug = sub () { '' };
         *_debug = sub ($) {};
     }
 
@@ -117,7 +133,7 @@ sub main () {
         servers => [ $server ],
         close_on_error => 1,
     });
-    _debug "Server version " . $cache->server_versions->{$server};
+    _debug "Server version " . $cache->server_versions->{$server} if _do_debug;
 
     my $clear_cache = 0;
     $clear_cache = 1 if exists $OPTIONS->{clear} or exists $OPTIONS->{nuke};
@@ -138,6 +154,7 @@ sub main () {
     }
     _debug "do_cache:$do_cache";
     if ( $do_cache && (my $cached = $cache->get($cache_key)) ) {
+        _debug "Cache HIT for <$cache_key>";
         print $cached->{STDOUT};
         exit $cached->{exit_code};
     }
@@ -176,7 +193,8 @@ sub main () {
     if ( length($child_STDERR) ) {
         _debug "Not caching this one";
         print STDERR $child_STDERR;
-    } else {
+    } elsif ( $do_cache ) {
+        _debug "Caching <$cache_key>";
         $cache->set($cache_key, { STDOUT => $child_STDOUT, exit_code => $exit_code });
     }
     print $child_STDOUT;
