@@ -1,0 +1,170 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use v5.18.2;
+
+use Data::Dumper;
+use Cwd;
+use Cache::Memcached::Fast;
+use IPC::Run qw(
+    start
+    finish
+);
+
+sub CACHE_KEY_SEP () { $; }
+
+my $OPTS_ENVVAR_NAME = 'CACHEWRAP_OPTS';
+my $OPTIONS = $ENV{$OPTS_ENVVAR_NAME}
+    ? {
+        map +(
+            (split '=', $_, 2)[0,1]
+        ),
+        split /,/, $ENV{$OPTS_ENVVAR_NAME}
+    }
+    : {}
+;
+
+if ( exists $OPTIONS->{help} ) {
+    say STDERR <<"HELP";
+
+    Usage: [not to be called directly]
+
+    Place a symlink to cache-wrap early in your \$PATH, give it the
+    name of the command you want to cache, and then just call the
+    command as usual.
+    cache-wrap will run the next command in \$PATH that has the
+    same name as the symlink, and stick the stdout into memcache.
+    The next time the same command is ran from the same directory with
+    the same arguments, the program will not run and instead the result
+    will come from memcache.
+
+    As an example:
+
+     \$ # (the script is in ~/cache-path/@{[ readlink $0 ]}
+     \$ ALT_PATH=\$HOME/cache-path
+     \$ ln -s ~/cache-path/@{[ readlink $0 ]} \$ALT_PATH/date
+     \$ date
+     [...]
+     \$ date
+     [same output as above, from memcache]
+
+    **Note**: if the command writes anything to STDERR then its STDOUT will **NOT** be cached.
+
+    You can set the environment variable $OPTS_ENVVAR_NAME to a
+    comma-separated list of options:
+
+     - help      print this text and exit
+     - debug     output some debugging information
+     - server    specify Memcache server address (default 127.0.0.1:11211)
+     - nocache   disable cache, always run actual command
+     - clear     clear cache (delete from Memcache) then run the actual command
+     - nuke      alias for `clear`
+
+     Examples:
+
+      \$ $OPTS_ENVVAR_NAME=server=2.3.4.5:11211,debug slow-cmd arg1 arg2
+HELP
+    exit 1;
+}
+
+sub _debug ($);
+
+sub _fatal ($) {
+    my ($msg) = @_;
+    die $msg;
+}
+
+sub main () {
+    my $cwd = getcwd;
+    my $cache_key = join '', (
+        $cwd,
+        CACHE_KEY_SEP,
+        $0,
+        CACHE_KEY_SEP,
+        @ARGV
+    );
+
+    if ( exists $OPTIONS->{debug} ) {
+        *_debug = sub ($) {
+            my ($msg) = @_;
+
+            $msg =~ s/^/# /mg;
+            $msg .= "\n" unless substr($msg, -1, 1) eq "\n";
+
+            print STDERR "$msg";
+        };
+    } else {
+        *_debug = sub ($) {};
+    }
+
+    _debug "Options: @{[ Dumper( $OPTIONS ) ]}";
+    # _debug "Caching: cwd<$cwd> ARGV<@ARGV> -> <$cache_key>";
+    my $memcache_key = $cache_key;
+
+    my $server = $OPTIONS->{server} || '127.0.0.1:11211';
+    _debug "Talking to $server";
+    my $cache = Cache::Memcached::Fast->new({
+        servers => [ $server ],
+        close_on_error => 1,
+    });
+    _debug "Server version " . $cache->server_versions->{$server};
+
+    my $clear_cache = 0;
+    $clear_cache = 1 if exists $OPTIONS->{clear} or exists $OPTIONS->{nuke};
+    if ( $clear_cache ) {
+        $cache->delete($cache_key);
+    }
+
+    my $do_cache = 1;
+    $do_cache = 0 if exists $OPTIONS->{nocache};
+    if ( $do_cache && (my $cached = $cache->get($cache_key)) ) {
+        print $cached->{STDOUT};
+        exit $cached->{exit_code};
+    }
+
+    my ($dirname, $basename) = $0 =~ m{\A (.*?) /? ([^/]+) \z}x;
+    my @PATH_elements = split ':', $ENV{PATH};
+    my @candidates;
+    PATH:
+    foreach my $path_element ( @PATH_elements ) {
+        if ( $dirname eq $path_element ) {
+            next PATH;
+        }
+
+        my $candidate = "$path_element/$basename";
+        if ( -x $candidate ){
+            push @candidates, $candidate;
+        }
+    }
+    if ( ! @candidates ) {
+        _fatal "No $basename in downstream \$PATH";
+    }
+
+    my $next = $candidates[0];
+
+    # _debug sprintf "PATH_elements<%s>", Dumper( \@PATH_elements );
+    # _debug "dirname<$dirname> basename<$basename>";
+    _debug "Next in \$PATH: $next";
+
+    my ($child_STDIN, $child_STDOUT, $child_STDERR);
+    my $harness = start [ $next, @ARGV ], \$child_STDIN, \$child_STDOUT, \$child_STDERR;
+    finish $harness;
+    my ($exit_code) = $harness->results;
+
+    _debug "Ran; " . Dumper({ stdout => $child_STDOUT, stderr => $child_STDERR, exit_code => $exit_code });
+
+    if ( length($child_STDERR) ) {
+        _debug "Not caching this one";
+        print STDERR $child_STDERR;
+    } else {
+        $cache->set($cache_key, { STDOUT => $child_STDOUT, exit_code => $exit_code });
+    }
+    print $child_STDOUT;
+    exit $exit_code;
+}
+
+main;
+
+# vim: filetype=perl tabstop=4 shiftwidth=4 expandtab:
+__END__
